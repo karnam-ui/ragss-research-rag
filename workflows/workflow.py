@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import TypedDict
+from typing import Optional, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 class RAGState(TypedDict):
@@ -69,10 +69,12 @@ graph.add_edge("generate", END)
 
 
 app = graph.compile()
-graph_image_path = Path(__file__).with_name("rag_workflow.png")
-app.get_graph().draw_mermaid_png(output_file_path=str(graph_image_path))
-print(f"Graph diagram saved to {graph_image_path}")
 
+
+def export_workflow_diagram(output_path: Optional[Path] = None) -> Path:
+    target_path = output_path or Path(__file__).with_name("rag_workflow.png")
+    app.get_graph().draw_mermaid_png(output_file_path=str(target_path))
+    return target_path
 
 
 def run_rag_workflow(question: str):
@@ -86,5 +88,12 @@ def run_rag_workflow(question: str):
     }
     
     result = app.invoke(state)
-    print(result)
+    return result
+
+
+if __name__ == "__main__":
+    diagram_path = export_workflow_diagram()
+    print(f"Graph diagram saved to {diagram_path}")
+    sample_res = run_rag_workflow("What is in unit 2?")
+    print("Workflow execution result:\n", sample_res)
 

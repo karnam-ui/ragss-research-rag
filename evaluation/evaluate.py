@@ -10,7 +10,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -118,7 +118,81 @@ def build_live_retriever(k: int = 5):
     return live_retrieve
 
 
-def main():
+def run_evaluation(
+    dataset_path: str,
+    mode: str = "fixture",
+    target_id_level: str = "parent",
+    max_k: int = 5,
+    output_json_path: Optional[str] = None,
+    quiet: bool = False,
+):
+    if not quiet:
+        print("=" * 70)
+        print(" RAGSS RETRIEVAL EVALUATION HARNESS")
+        print("=" * 70)
+        print(f"Evaluation Mode: {mode.upper()}")
+        print(f"Dataset Path:    {dataset_path}")
+        print(f"Target ID Level: {target_id_level}")
+        print(f"Max Retrieval K: {max_k}\n")
+
+    evaluator = RetrievalEvaluator(dataset_path=dataset_path, target_id_level=target_id_level)
+
+    if mode == "fixture":
+        if not quiet:
+            print("Initializing deterministic fixture retriever...")
+        retriever_fn = build_fixture_retriever()
+    else:
+        if not quiet:
+            print("Initializing live Retriever against sample papers...")
+        retriever_fn = build_live_retriever(k=max_k)
+
+    if not quiet:
+        print(f"Running evaluation over {len(evaluator.dataset)} queries...\n")
+    metrics = evaluator.evaluate(retriever_fn=retriever_fn, max_k=max_k)
+
+    if not quiet:
+        print("=" * 70)
+        print("PER-QUERY RESULTS")
+        print("=" * 70)
+        for res in metrics.per_query_results:
+            type_str = "Answerable" if res.is_answerable else "Unanswerable"
+            if res.is_answerable:
+                status_icon = "✓" if res.has_any_hit else "✗"
+                print(f"{status_icon} [{res.query_id}] ({type_str}) - {res.question[:55]}...")
+                print(f"    Expected:  {res.expected_ids}")
+                print(f"    Retrieved: {res.retrieved_ids}")
+                print(f"    R@1: {res.recall_at_1:.2f} | R@3: {res.recall_at_3:.2f} | R@5: {res.recall_at_5:.2f} | P@5: {res.precision_at_5:.2f} | MRR: {res.mrr:.2f} | Latency: {res.latency_ms:.2f}ms")
+            else:
+                if res.empty_retrieval:
+                    status_icon = "✓"
+                    print(f"{status_icon} [{res.query_id}] ({type_str}) - {res.question[:55]}...")
+                    print("    Out-of-corpus query | Clean abstention (0 docs retrieved)")
+                else:
+                    status_icon = "✗"
+                    print(f"{status_icon} [{res.query_id}] ({type_str}) - {res.question[:55]}...")
+                    print(f"    Out-of-corpus query | False positive retrieval ({len(res.retrieved_ids)} doc(s) retrieved: {res.retrieved_ids})")
+            print("-" * 70)
+
+        print("\n" + "=" * 70)
+        print("AGGREGATE BENCHMARK RESULTS")
+        print("=" * 70)
+        print(metrics.summary_table())
+
+    if output_json_path:
+        out_path = Path(output_json_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_payload = metrics.to_dict()
+        summary_payload["mode"] = mode
+        summary_payload["target_id_level"] = target_id_level
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(summary_payload, f, indent=2)
+        if not quiet:
+            print(f"✓ Saved detailed results JSON to: {out_path}")
+
+    return metrics
+
+
+def main(argv: Optional[List[str]] = None):
     parser = argparse.ArgumentParser(description="Evaluate RAGSS retrieval performance.")
     parser.add_argument(
         "--mode",
@@ -145,65 +219,15 @@ def main():
         default=None,
         help="Optional path to write full evaluation results as JSON.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    print("=" * 70)
-    print(" RAGSS RETRIEVAL EVALUATION HARNESS")
-    print("=" * 70)
-    print(f"Evaluation Mode: {args.mode.upper()}")
-    print(f"Dataset Path:    {args.dataset}")
-    print(f"Target ID Level: {args.level}")
-    print(f"Max Retrieval K: {args.k}\n")
-
-    evaluator = RetrievalEvaluator(dataset_path=args.dataset, target_id_level=args.level)
-
-    if args.mode == "fixture":
-        print("Initializing deterministic fixture retriever...")
-        retriever_fn = build_fixture_retriever()
-    else:
-        print("Initializing live Retriever against sample papers...")
-        retriever_fn = build_live_retriever(k=args.k)
-
-    print(f"Running evaluation over {len(evaluator.dataset)} queries...\n")
-    metrics = evaluator.evaluate(retriever_fn=retriever_fn, max_k=args.k)
-
-    print("=" * 70)
-    print("PER-QUERY RESULTS")
-    print("=" * 70)
-    for res in metrics.per_query_results:
-        type_str = "Answerable" if res.is_answerable else "Unanswerable"
-        if res.is_answerable:
-            status_icon = "✓" if res.has_any_hit else "✗"
-            print(f"{status_icon} [{res.query_id}] ({type_str}) - {res.question[:55]}...")
-            print(f"    Expected:  {res.expected_ids}")
-            print(f"    Retrieved: {res.retrieved_ids}")
-            print(f"    R@1: {res.recall_at_1:.2f} | R@3: {res.recall_at_3:.2f} | R@5: {res.recall_at_5:.2f} | P@5: {res.precision_at_5:.2f} | MRR: {res.mrr:.2f} | Latency: {res.latency_ms:.2f}ms")
-        else:
-            if res.empty_retrieval:
-                status_icon = "✓"
-                print(f"{status_icon} [{res.query_id}] ({type_str}) - {res.question[:55]}...")
-                print("    Out-of-corpus query | Clean abstention (0 docs retrieved)")
-            else:
-                status_icon = "✗"
-                print(f"{status_icon} [{res.query_id}] ({type_str}) - {res.question[:55]}...")
-                print(f"    Out-of-corpus query | False positive retrieval ({len(res.retrieved_ids)} doc(s) retrieved: {res.retrieved_ids})")
-        print("-" * 70)
-
-    print("\n" + "=" * 70)
-    print("AGGREGATE BENCHMARK RESULTS")
-    print("=" * 70)
-    print(metrics.summary_table())
-
-    if args.output_json:
-        out_path = Path(args.output_json)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_payload = metrics.to_dict()
-        summary_payload["mode"] = args.mode
-        summary_payload["target_id_level"] = args.level
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(summary_payload, f, indent=2)
-        print(f"✓ Saved detailed results JSON to: {out_path}")
-
+    run_evaluation(
+        dataset_path=args.dataset,
+        mode=args.mode,
+        target_id_level=args.level,
+        max_k=args.k,
+        output_json_path=args.output_json,
+    )
     return 0
 
 

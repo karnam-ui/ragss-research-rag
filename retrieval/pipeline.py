@@ -18,19 +18,15 @@ class BasicRetriever:
         self.retriever = retriever
         self.llm = llm if llm is not None else get_llm()
 
-        self.prompt = ChatPromptTemplate.from_template("""
-You are a Project Guide assistant.
+        self.prompt = ChatPromptTemplate.from_template("""You are an expert research and technical document evidence assistant.
 
 Answer the user's question using ONLY the provided context.
 
 Rules:
-- Answer ONLY what the user asked.
+- Answer ONLY what the user asked based on the provided context.
 - Do not add unrelated information from the context.
-- Do not repeat information.
-- If the question asks for a list, provide only the requested list.
-- If the context contains unrelated projects, topics, or text, ignore them.
 - Do not invent or infer information that is not explicitly supported by the context.
-- Keep the answer concise and direct.
+- Keep the answer concise, accurate, and direct.
 - If the context does not contain enough information to answer the question, say:
   "The provided documents do not contain enough information to answer this."
 
@@ -39,15 +35,21 @@ Context:
 
 Question:
 {question}
-
 """)
 
         # prompt → LLM
         self.chain = self.prompt | self.llm
 
 
-    def generate(self, query):
+    def generate(self, query: str) -> dict:
         results = self.retriever.retrieve(query)
+
+        # Clean abstention: If no documents were retrieved, do NOT invoke the LLM.
+        if not results:
+            return {
+                "answer": "The provided documents do not contain enough information to answer this.",
+                "citations": [],
+            }
 
         # Keep metadata out of the prompt so the model receives only source text.
         context = "\n\n".join(
@@ -60,16 +62,22 @@ Question:
             "question": query
         })
 
-        citations = [
-            {
+        citations = []
+        for result in results:
+            raw_page = result.metadata.get("page", 0)
+            try:
+                page_num = int(raw_page) + 1
+            except (ValueError, TypeError):
+                page_num = 1
+            citations.append({
                 "document_id": result.metadata.get("document_id"),
                 "document_name": result.metadata.get("document_name"),
                 "source": result.metadata.get("source"),
                 "title": result.metadata.get("title"),
-                "page": int(result.metadata.get("page", 0)) + 1,
-            }
-            for result in results
-        ]
+                "page": page_num,
+                "chunk_id": result.metadata.get("chunk_id"),
+                "parent_id": result.metadata.get("parent_id"),
+            })
 
         return {
             "answer": response,

@@ -9,7 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from langchain_core.prompts import ChatPromptTemplate
-from retrieval.evidence import Claim, Evidence, SupportStatus
+from retrieval.evidence import Claim, ClaimVerifier, Evidence, SupportStatus
 from retrieval.retriver import Retriever
 
 
@@ -26,6 +26,7 @@ class PaperAnalysis:
     citations: List[Dict[str, Any]] = field(default_factory=list)
     source_evidence: List[Evidence] = field(default_factory=list)
     claims: List[Claim] = field(default_factory=list)
+    diagnostics: Optional[Dict[str, Any]] = None
 
 
 PAPER_ANALYSIS_PROMPT = ChatPromptTemplate.from_template("""You are an expert research paper evidence analyst.
@@ -58,7 +59,12 @@ Structured Paper Analysis:
 
 
 class PaperAnalyzer:
-    def __init__(self, retriever: Optional[Retriever] = None, llm: Optional[Any] = None):
+    def __init__(
+        self,
+        retriever: Optional[Retriever] = None,
+        llm: Optional[Any] = None,
+        verifier: Optional[ClaimVerifier] = None,
+    ):
         self.retriever = retriever
         if llm is None:
             from retrieval.retrieve_llm_pipeline import llm as default_llm
@@ -66,6 +72,7 @@ class PaperAnalyzer:
         else:
             self.llm = llm
 
+        self.verifier = verifier if verifier is not None else ClaimVerifier()
         self.chain = PAPER_ANALYSIS_PROMPT | self.llm
 
     def _ensure_retriever(self, file_paths: Optional[Union[str, List[str]]] = None) -> Retriever:
@@ -83,10 +90,14 @@ class PaperAnalyzer:
 
         # Query relevant sections for this specific paper
         query = "title research problem objective methodology approach major claims experimental evidence limitations"
-        evidence_docs = retriever.retrieve(query=query, k=k, document_id=document_id)
+        if hasattr(retriever, "retrieve_with_diagnostics"):
+            evidence_docs, diagnostics = retriever.retrieve_with_diagnostics(query=query, k=k, document_id=document_id)
+        else:
+            evidence_docs = retriever.retrieve(query=query, k=k, document_id=document_id)
+            diagnostics = None
 
         # Fallback to direct parent documents if retrieval returned empty
-        if not evidence_docs:
+        if not evidence_docs and hasattr(retriever, "parents") and retriever.parents:
             evidence_docs = [
                 parent for parent in retriever.parents
                 if parent.metadata.get("document_id") == document_id
@@ -97,12 +108,29 @@ class PaperAnalyzer:
         elif not document_name:
             document_name = "Unknown Document"
 
+        # Clean abstention: If no evidence could be retrieved or found, do not invoke LLM.
+        if not evidence_docs:
+            return PaperAnalysis(
+                document_id=document_id,
+                document_name=document_name,
+                title=document_name,
+                research_problem="Not available in the provided evidence.",
+                methodology="Not available in the provided evidence.",
+                major_claims="Not available in the provided evidence.",
+                evidence="Not available in the provided evidence.",
+                limitations="Not available in the provided evidence.",
+                citations=[],
+                source_evidence=[],
+                claims=[],
+                diagnostics=diagnostics,
+            )
+
         # Separate metadata and build text context for LLM
         context = "\n\n".join(doc.page_content for doc in evidence_docs)
 
         llm_response = self.chain.invoke({
             "document_name": document_name,
-            "context": context if context.strip() else "No evidence text found for this paper.",
+            "context": context,
         })
 
         parsed_fields = self._parse_analysis_output(llm_response, default_title=document_name)
@@ -110,36 +138,43 @@ class PaperAnalyzer:
         # Preserve retrieved documents deterministically as Evidence objects
         source_evidence = [Evidence.from_document(doc) for doc in evidence_docs]
 
-        # Structure individual claims linked to source evidence
+        # Structure individual claims and verify support against source evidence
         raw_claims = parsed_fields["major_claims"].split("\n")
         claim_texts = [
             re.sub(r"^[\s*\-\d\.\)]+", "", line).strip()
             for line in raw_claims
             if line.strip()
         ]
-        if not claim_texts:
-            claim_texts = [parsed_fields["major_claims"].strip()]
-
-        claims = [
-            Claim(
-                text=ct,
-                evidence=source_evidence,
-                support_status=SupportStatus.SUPPORTED,
-            )
-            for ct in claim_texts
-            if ct
+        valid_claim_texts = [
+            ct for ct in claim_texts
+            if ct and "not available in the provided evidence" not in ct.lower()
         ]
 
+        claims: List[Claim] = []
+        for ct in valid_claim_texts:
+            status, supporting_ev = self.verifier.verify(ct, source_evidence)
+            claims.append(
+                Claim(
+                    text=ct,
+                    evidence=supporting_ev,
+                    support_status=status,
+                )
+            )
+
         # Preserve original document metadata deterministically as citations
-        citations = [
-            {
+        citations = []
+        for doc in evidence_docs:
+            raw_page = doc.metadata.get("page", 0)
+            try:
+                page_num = int(raw_page) + 1
+            except (ValueError, TypeError):
+                page_num = 1
+            citations.append({
                 "document_id": doc.metadata.get("document_id", document_id),
                 "document_name": doc.metadata.get("document_name", document_name),
                 "source": doc.metadata.get("source"),
-                "page": int(doc.metadata.get("page", 0)) + 1,
-            }
-            for doc in evidence_docs
-        ]
+                "page": page_num,
+            })
 
         return PaperAnalysis(
             document_id=document_id,
@@ -153,6 +188,7 @@ class PaperAnalyzer:
             citations=citations,
             source_evidence=source_evidence,
             claims=claims,
+            diagnostics=diagnostics,
         )
 
     def analyze_papers(
@@ -207,9 +243,10 @@ def analyze_papers(
     file_paths: Optional[Union[str, List[str]]] = None,
     retriever: Optional[Retriever] = None,
     llm: Optional[Any] = None,
+    verifier: Optional[ClaimVerifier] = None,
     k: int = 4,
 ) -> List[PaperAnalysis]:
-    analyzer = PaperAnalyzer(retriever=retriever, llm=llm)
+    analyzer = PaperAnalyzer(retriever=retriever, llm=llm, verifier=verifier)
     return analyzer.analyze_papers(file_paths=file_paths, k=k)
 
 

@@ -41,6 +41,49 @@ def test_basic_retriever_pipeline():
     assert result["citations"][0]["page"] == 2  # 1-indexed display page
 
 
+def test_basic_retriever_empty_retrieval_abstains():
+    class EmptyRetriever:
+        def retrieve(self, query):
+            return []
+
+    # If the LLM is invoked, FakeListLLM will raise IndexError because responses is empty!
+    fake_llm = FakeListLLM(responses=[])
+    pipeline = BasicRetriever(retriever=EmptyRetriever(), llm=fake_llm)
+
+    result = pipeline.generate("What is the quantum state vector?")
+    assert "answer" in result
+    assert result["answer"] == "The provided documents do not contain enough information to answer this."
+    assert result["citations"] == []
+
+
+def test_basic_retriever_metadata_edge_cases():
+    class EdgeCaseRetriever:
+        def retrieve(self, query):
+            return [
+                Document(
+                    page_content="Content with invalid page metadata.",
+                    metadata={
+                        "document_id": "doc_edge",
+                        "document_name": "edge.pdf",
+                        "page": "invalid_page_number",
+                        "chunk_id": "c_edge_1",
+                        "parent_id": "p_edge_1",
+                    },
+                )
+            ]
+
+    fake_llm = FakeListLLM(responses=["Summary of content."])
+    pipeline = BasicRetriever(retriever=EdgeCaseRetriever(), llm=fake_llm)
+
+    result = pipeline.generate("Query")
+    assert len(result["citations"]) == 1
+    cit = result["citations"][0]
+    assert cit["page"] == 1  # Fallback to page 1
+    assert cit["chunk_id"] == "c_edge_1"
+    assert cit["parent_id"] == "p_edge_1"
+
+
+
 if __name__ == "__main__":
     from retrieval.retriver import Retriever
 

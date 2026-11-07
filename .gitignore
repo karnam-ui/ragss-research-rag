@@ -5,3 +5,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 tests/test_eval_db/
+uploads/
+frontend/dist/
+frontend/node_modules/
+chroma_db/sessions/

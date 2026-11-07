@@ -10,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from langchain_core.prompts import ChatPromptTemplate
 from retrieval.evidence import (
+    ClaimVerifier,
     ConflictingFinding,
     CorroboratingFinding,
     Evidence,
@@ -32,6 +33,7 @@ class CrossPaperAnalysis:
     corroborating_findings_structured: List[CorroboratingFinding] = field(default_factory=list)
     conflicting_findings_structured: List[ConflictingFinding] = field(default_factory=list)
     research_gaps_structured: List[ResearchGap] = field(default_factory=list)
+    diagnostics: Optional[Dict[str, Any]] = None
 
 
 CROSS_PAPER_PROMPT = ChatPromptTemplate.from_template("""You are an expert meta-scientific research analyst.
@@ -76,13 +78,18 @@ Structured Cross-Paper Synthesis:
 
 
 class CrossPaperAnalyzer:
-    def __init__(self, llm: Optional[Any] = None):
+    def __init__(
+        self,
+        llm: Optional[Any] = None,
+        verifier: Optional[ClaimVerifier] = None,
+    ):
         if llm is None:
             from retrieval.retrieve_llm_pipeline import llm as default_llm
             self.llm = default_llm
         else:
             self.llm = llm
 
+        self.verifier = verifier if verifier is not None else ClaimVerifier()
         self.chain = CROSS_PAPER_PROMPT | self.llm
 
     def format_paper_analyses(self, paper_analyses: List[PaperAnalysis]) -> str:
@@ -213,11 +220,12 @@ class CrossPaperAnalyzer:
                 if line:
                     papers = self._detect_papers_for_text(line, paper_analyses)
                     paper_evidence = [ev for p in papers for ev in p.source_evidence]
+                    specific_ev = self.verifier.filter_supporting_evidence(line, paper_evidence, threshold=0.15)
                     corroborating.append(
                         CorroboratingFinding(
                             finding=line,
                             supporting_papers=[p.document_name for p in papers],
-                            evidence=EvidenceAggregator(paper_evidence).deduplicate(),
+                            evidence=EvidenceAggregator(specific_ev).deduplicate(),
                         )
                     )
 
@@ -229,12 +237,13 @@ class CrossPaperAnalyzer:
                 if line:
                     papers = self._detect_papers_for_text(line, paper_analyses)
                     paper_evidence = [ev for p in papers for ev in p.source_evidence]
+                    specific_ev = self.verifier.filter_supporting_evidence(line, paper_evidence, threshold=0.15)
                     conflicting.append(
                         ConflictingFinding(
                             topic=line,
                             papers=[p.document_name for p in papers],
                             explanation=line,
-                            evidence=EvidenceAggregator(paper_evidence).deduplicate(),
+                            evidence=EvidenceAggregator(specific_ev).deduplicate(),
                         )
                     )
 
@@ -246,11 +255,12 @@ class CrossPaperAnalyzer:
                 if line:
                     papers = self._detect_papers_for_text(line, paper_analyses)
                     paper_evidence = [ev for p in papers for ev in p.source_evidence]
+                    specific_ev = self.verifier.filter_supporting_evidence(line, paper_evidence, threshold=0.15)
                     gaps.append(
                         ResearchGap(
                             finding=line,
                             relevant_papers=[p.document_name for p in papers],
-                            evidence=EvidenceAggregator(paper_evidence).deduplicate(),
+                            evidence=EvidenceAggregator(specific_ev).deduplicate(),
                         )
                     )
 
@@ -290,6 +300,39 @@ class CrossPaperAnalyzer:
 def analyze_cross_paper(
     paper_analyses: List[PaperAnalysis],
     llm: Optional[Any] = None,
+    verifier: Optional[ClaimVerifier] = None,
 ) -> CrossPaperAnalysis:
-    analyzer = CrossPaperAnalyzer(llm=llm)
+    analyzer = CrossPaperAnalyzer(llm=llm, verifier=verifier)
     return analyzer.analyze(paper_analyses)
+
+
+if __name__ == "__main__":
+    import argparse
+    from retrieval.paper_analysis import analyze_papers
+
+    parser = argparse.ArgumentParser(description="Run cross-paper comparative research analysis.")
+    parser.add_argument("pdf_paths", nargs="+", help="Path(s) to 2 or more PDF research papers to compare.")
+    parser.add_argument("--k", type=int, default=4, help="Number of evidence chunks to retrieve per paper.")
+    args = parser.parse_args()
+
+    paths = args.pdf_paths
+    print(f"Running Cross-Paper Comparative Analysis across {len(paths)} paper(s):")
+    for p in paths:
+        print(f" - {p}")
+
+    paper_analyses = analyze_papers(file_paths=paths, k=args.k)
+    cross_result = analyze_cross_paper(paper_analyses)
+
+    print("\n" + "=" * 70)
+    print("CROSS-PAPER RESEARCH SYNTHESIS")
+    print("=" * 70)
+    print(f"Analyzed Papers ({len(cross_result.analyzed_papers)}):")
+    for p in cross_result.analyzed_papers:
+        print(f" - {p.get('document_name')} ({p.get('document_id')}): {p.get('title')}")
+    print(f"\n[1] SIMILARITIES:\n{cross_result.similarities}")
+    print(f"\n[2] DIFFERENCES:\n{cross_result.differences}")
+    print(f"\n[3] CORROBORATING FINDINGS:\n{cross_result.corroborating_findings}")
+    print(f"\n[4] CONFLICTING FINDINGS:\n{cross_result.conflicting_findings}")
+    print(f"\n[5] RESEARCH GAPS:\n{cross_result.research_gaps}")
+    print(f"\n[6] OVERALL SYNTHESIS:\n{cross_result.overall_synthesis}")
+    print("=" * 70 + "\n")

@@ -68,7 +68,8 @@ flowchart TD
 | **Single-Paper Extraction** | Implemented | Extracts structured sections (Title, Research Problem, Methodology, Claims, Evidence, Limitations). |
 | **Cross-Paper Synthesis** | Implemented | Compares multiple papers for corroborations, conflicts, and gaps. |
 | **Offline Evaluation Harness** | Implemented | Evaluates Recall@K, MRR, Hit@K, and unanswerable query abstention. |
-| **Fast Deterministic Test Suite** | Implemented | 34 automated unit/regression tests running in ~2 seconds offline. |
+| **Fast Deterministic Test Suite** | Implemented | 110 automated unit/regression tests running in ~2.8 seconds offline. |
+| **Unified Production CLI (`main.py`)** | Implemented | Subcommands: `query`, `analyze`, `compare`, `evaluate`, and `ingest`. |
 
 ---
 
@@ -99,7 +100,7 @@ pip install -r requirements.txt
 The test suite separates **fast offline deterministic tests** from **heavy live-model integration tests** via `pytest.ini`.
 
 ### Fast Offline Unit Tests (Default)
-Executes all 34 offline unit tests (metrics correctness, dataset schema validation, hybrid retrieval logic, parent-child expansion, and citation provenance) in **under 3 seconds without downloading model weights**:
+Executes all 110 offline unit tests (CLI error contracts, configuration dynamic precedence and validation, metrics correctness, hybrid retrieval logic, parent-child expansion, and evidence provenance) in **under 3 seconds without downloading model weights**:
 ```bash
 python -m pytest
 ```
@@ -170,21 +171,116 @@ The following verified metrics were produced by running the evaluation harness a
 
 ---
 
-## 8. Running the Application Pipeline
+## 8. Unified Command-Line Interface (`main.py`)
 
-### Single / Multi-Paper Analysis CLI
+RAGSS exposes a unified, production-ready CLI entrypoint via `main.py` (command `ragss`) with 5 dedicated subcommands.
+
+### A. Grounded Querying (`ragss query`)
+Ask natural-language questions against indexed documents with full evidence provenance:
 ```bash
-python -m retrieval.paper_analysis tests/sample_papers/paper1_transformers.pdf tests/sample_papers/paper2_bert.pdf --k 4
+# Query indexed documents with local LLM generation
+python main.py query "How does scaled dot-product attention compute weights?" --k 4
+
+# Fast retrieval preview mode: runs embedding inference, BM25, RRF, cross-encoder reranking,
+# and parent expansion while bypassing the generative LLM (Qwen2.5-1.5B) and token decoding
+python main.py query "What is MLM in BERT?" --no-llm
+
+# Structured JSON output for downstream tooling / automation
+python main.py query "Explain non-parametric memory in RAG" --json
 ```
 
-### Banking Multi-Year Rate Analysis Demo
+### B. Structured Paper Analysis (`ragss analyze`)
+Extract structured sections (Problem, Methodology, Major Claims, Empirical Evidence, Limitations) and verified `Claim` objects:
 ```bash
+# Analyze a single paper or multiple papers
+python main.py analyze tests/sample_papers/paper1_transformers.pdf --k 4
+
+# Export analysis results as structured JSON
+python main.py analyze tests/sample_papers/paper1_transformers.pdf tests/sample_papers/paper2_bert.pdf --output analysis.json
+```
+
+### C. Cross-Paper Comparative Synthesis (`ragss compare`)
+Perform multi-document comparative analysis identifying shared findings, conflicting methodologies, and research gaps:
+```bash
+# Compare two or more research papers
+python main.py compare tests/sample_papers/paper1_transformers.pdf tests/sample_papers/paper2_bert.pdf tests/sample_papers/paper3_rag.pdf --output comparison.json
+```
+
+### D. Benchmark Evaluation Harness (`ragss evaluate`)
+Run the 12-query retrieval benchmark suite:
+```bash
+# Fast deterministic offline fixture mode (< 0.1s)
+python main.py evaluate --mode fixture --k 5
+
+# Live corpus retrieval evaluation
+python main.py evaluate --mode live --k 5 --output-json evaluation_results.json
+
+# Machine-readable JSON output to stdout
+python main.py evaluate --mode fixture --json
+```
+
+### E. Standalone Ingestion (`ragss ingest`)
+Index documents into ChromaDB and initialize BM25 lexical structures without immediately executing queries:
+```bash
+python main.py ingest tests/sample_papers/ --json
+```
+
+### F. Legacy Compatibility Entry Points
+For backward compatibility with existing scripts, legacy entry points remain supported:
+```bash
+# Legacy multi-paper script
+python -m retrieval.paper_analysis tests/sample_papers/paper1_transformers.pdf tests/sample_papers/paper2_bert.pdf --k 4
+
+# Banking multi-year rate analysis demo
 python run_bank_query.py --docs-dir tests/bank_docs --query "what is the roi of savings acc of 22-23" --k 3
 ```
 
 ---
 
-## 9. Known Limitations & Engineering Boundaries
+## 9. Configuration & Environment Variables
+
+All pipeline parameters are centralized in [`retrieval/config.py`](retrieval/config.py) via `RAGConfig`. The configuration follows dynamic precedence evaluated at instantiation time:
+`Explicit constructor args > Environment variables (RAGSS_*) > Documented defaults`
+
+| Environment Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `RAGSS_EMBED_MODEL` | `BAAI/bge-small-en-v1.5` | Dense embedding model checkpoint |
+| `RAGSS_CROSS_ENCODER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder reranker |
+| `RAGSS_LLM_MODEL` | `Qwen/Qwen2.5-1.5B-Instruct` | Local generation LLM |
+| `RAGSS_CHUNK_SIZE` | `200` | Child chunk character size (> 0) |
+| `RAGSS_CHUNK_OVERLAP` | `20` | Child chunk character overlap (>= 0, < size) |
+| `RAGSS_CHROMA_DIR` | `./chroma_db` | Persistent ChromaDB storage path |
+| `RAGSS_COLLECTION_NAME` | `research_papers` | ChromaDB collection name |
+| `RAGSS_RETRIEVAL_K` | `4` | Default retrieved passages count (> 0) |
+| `RAGSS_RRF_K` | `60` | Reciprocal Rank Fusion constant (> 0) |
+| `RAGSS_SUPPORT_THRESHOLD` | `0.5` | Minimum token overlap for `SUPPORTED` claim |
+| `RAGSS_PARTIAL_THRESHOLD` | `0.25` | Minimum token overlap for `PARTIALLY_SUPPORTED` |
+| `RAGSS_CROSS_FINDING_THRESHOLD`| `0.15`| Minimum overlap for cross-paper finding evidence |
+
+Example runtime override:
+```bash
+RAGSS_RETRIEVAL_K=6 RAGSS_SUPPORT_THRESHOLD=0.6 python main.py query "What is scaled attention?" --no-llm
+```
+
+---
+
+## 10. Exit Code Standards & Stream Isolation
+
+### Exit Code Contract
+The CLI strictly adheres to standard POSIX process exit conventions:
+- **`0`**: Successful execution of the requested operation or `--help`.
+- **`1`**: Application-level domain/validation error (e.g., non-existent file, empty query text, non-PDF file, comparing $< 2$ papers without `--allow-single`, non-positive $K$, or invalid configuration values). Informative diagnostic written to `stderr`.
+- **`2`**: Command-line syntax error (unrecognized argument flags or missing option parameters raised by `argparse`) OR unhandled internal system/database exceptions.
+- **`130`**: Interrupted by user via SIGINT / `KeyboardInterrupt` (`128 + 2`).
+
+### Machine-Readable Stream Isolation (`--json`)
+When `--json` is active:
+- **`stderr`**: Strictly receives all human-readable diagnostic messages, warnings, indexing progress lines, and error notices.
+- **`stdout`**: Strictly reserved for valid, parseable JSON payloads in both success and failure cases. If an error occurs, `stdout` outputs `{"status": "error", "error": "...", "exit_code": 1}` so downstream automated tools never encounter `JSONDecodeError`.
+
+---
+
+## 11. Known Limitations & Engineering Boundaries
 
 1. **In-Memory Parent Document Mapping:** Parent documents are currently held in memory in `self.parent_by_id`. Re-opening a persisted ChromaDB database across process boundaries requires either re-ingesting the PDFs or persisting parent text in metadata.
 2. **Page-Based Chunking Boundaries:** Parents are segmented by raw PDF page boundaries rather than semantic markdown/section headers. If a paragraph spans page boundaries, context may be split.
